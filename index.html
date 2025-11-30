@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>VR Cat: Head + Hands + Jump + Grab</title>
+  <style>
+    body { margin: 0; overflow: hidden; background: #000; }
+    #ui {
+      position: absolute; top: 10px; left: 10px; right: 10px;
+      color: #fff; font-family: system-ui, sans-serif; line-height: 1.4;
+      background: rgba(0,0,0,0.4); padding: 10px 12px; border-radius: 8px;
+    }
+    #ui kbd { background: #111; border: 1px solid #333; border-radius: 4px; padding: 2px 6px; }
+  </style>
+</head>
+<body>
+  <div id="ui">
+    Enter VR with the button if available. Hands steer the cat; dip a hand down to jump. Pinch to grab items, release to drop.
+    Without VR: use <kbd>WASD</kbd> to move, <kbd>Space</kbd> to jump, <kbd>E</kbd> to grab/drop, mouse to look.
+  </div>
+
+  <script type="module">
+    import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
+    import { VRButton } from 'https://unpkg.com/three@0.160.0/examples/jsm/webxr/VRButton.js';
+    import { XRHandModelFactory } from 'https://unpkg.com/three@0.160.0/examples/jsm/webxr/XRHandModelFactory.js';
+
+    // Scene, camera, renderer
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x101018);
+
+    const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 100);
+    camera.position.set(0, 1.6, 2);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.xr.enabled = true;
+    document.body.appendChild(renderer.domElement);
+    document.body.appendChild(VRButton.createButton(renderer));
+
+    // Lights
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 0.9));
+    const dir = new THREE.DirectionalLight(0xffffff, 0.8); dir.position.set(3, 5, 2); scene.add(dir);
+
+    // Ground
+    const ground = new THREE.Mesh(
+      new THREE.PlaneGeometry(60, 60),
+      new THREE.MeshStandardMaterial({ color: 0x303040, roughness: 1 })
+    );
+    ground.rotation.x = -Math.PI / 2;
+    ground.receiveShadow = true;
+    scene.add(ground);
+
+    // Central outline shape (your drawn motif)
+    const motif = new THREE.Group();
+    const capsule = new THREE.Mesh(
+      new THREE.CapsuleGeometry(0.55, 0.25, 12, 24),
+      new THREE.MeshBasicMaterial({ color: 0x88ccff, wireframe: true })
+    );
+    motif.add(capsule);
+    for (let i = 0; i < 4; i++) {
+      const petal = new THREE.Mesh(
+        new THREE.SphereGeometry(0.12, 16, 16),
+        new THREE.MeshBasicMaterial({ color: 0x88ccff, wireframe: true })
+      );
+      const angle = (i - 1.5) * 0.5;
+      petal.position.set(Math.sin(angle) * 0.38, 0.28, Math.cos(angle) * 0.05);
+      motif.add(petal);
+    }
+    motif.position.set(0, 1.5, -1.2);
+    scene.add(motif);
+
+    // Cat placeholder (can be replaced with glTF later)
+    const cat = new THREE.Group();
+    const body = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.25, 0.7), new THREE.MeshStandardMaterial({ color: 0xffcc66 }));
+    body.position.y = 0.25; cat.add(body);
+    const head = new THREE.Mesh(new THREE.BoxGeometry(0.25, 0.25, 0.25), new THREE.MeshStandardMaterial({ color: 0xffdd88 }));
+    head.position.set(0, 0.45, 0.35); cat.add(head);
+    const tail = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.35, 12), new THREE.MeshStandardMaterial({ color: 0xffbb55 }));
+    tail.rotation.z = Math.PI / 2; tail.position.set(-0.32, 0.33, -0.22); cat.add(tail);
+    cat.position.set(0, 0, 0);
+    scene.add(cat);
+
+    // Hand tracking
+    const handFactory = new XRHandModelFactory();
+    const hands = []; // [{ object3D, joints: { indexTip, thumbTip }, lastY, velocityY, heldItem }]
+    const JOINT = { INDEX_TIP: 'index-finger-tip', THUMB_TIP: 'thumb-tip' };
+    function addHand(index) {
+      const hand = renderer.xr.getHand(index);
+      scene.add(hand);
+      const handModel = handFactory.createHandModel(hand, 'mesh');
+      hand.add(handModel);
+      const state = { object3D: hand, joints: { indexTip: null, thumbTip: null }, lastY: null, velocityY: 0, heldItem: null };
+      hand.traverse(o => {
+        if (o.name === JOINT.INDEX_TIP) state.joints.indexTip = o;
+        if (o.name === JOINT.THUMB_TIP) state.joints.thumbTip = o;
+      });
+      hands[index] = state;
+    }
+    addHand(0); addHand(1);
+
+    // Items to grab
+    const grabbables = [];
+    const itemMat = new THREE.MeshStandardMaterial({ color: 0x66ccff, roughness: 0.6, metalness: 0.1 });
+    function spawnItem(p, type='cube') {
+      const mesh = type === 'cube'
+        ? new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.16, 0.16), itemMat.clone())
+        : new THREE.Mesh(new THREE.SphereGeometry(0.11, 20, 20), itemMat.clone());
+      mesh.position.copy(p);
+      mesh.userData = { vel: new THREE.Vector3(), heldBy: null };
+      scene.add(mesh); grabbables.push(mesh); return mesh;
+    }
+    spawnItem(new THREE.Vector3(0.6, 0.2, -0.6), 'cube');
+    spawnItem(new THREE.Vector3(-0.5, 0.2, -1.1), 'sphere');
+    spawnItem(new THREE.Vector3(0.0, 0.2, -1.4), 'cube');
+
+    // Movement/jump physics
+    let catVel = new THREE.Vector3(0, 0, 0);
+    let catOnGround = true;
+    const params = {
+      moveGain: 0.8,
+      jumpImpulse: 3.6,
+      gravity: -9.8,
+      damping: 0.88,
+      downTriggerVel: -1.6,
+      maxSpeed: 3.0
+    };
+
+    // Hand-based steering and jump
+    function headYawMatrix() {
+      const m = new THREE.Matrix4();
+      const q = new THREE.Quaternion().setFromRotationMatrix(camera.matrixWorld);
+      const e = new THREE.Euler().setFromQuaternion(q, 'YXZ');
+      const yaw = e.y;
+      const qYaw = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, yaw, 0, 'YXZ'));
+      return m.makeRotationFromQuaternion(qYaw);
+    }
+    function getSteerDirection() {
+      const left = hands[0]?.object3D, right = hands[1]?.object3D;
+      const steer = new THREE.Vector3();
+      if (left && right && left.visible && right.visible) {
+        const lp = new THREE.Vector3().setFromMatrixPosition(left.matrixWorld);
+        const rp = new THREE.Vector3().setFromMatrixPosition(right.matrixWorld);
+        const center = lp.add(rp).multiplyScalar(0.5);
+        const headPos = new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld);
+        const delta = new THREE.Vector3().subVectors(center, headPos);
+        steer.set(delta.x, 0, delta.z);
+      } else {
+        const forward = new THREE.Vector3(); camera.getWorldDirection(forward);
+        forward.y = 0; forward.normalize(); steer.copy(forward);
+      }
+      steer.y = 0; return steer.normalize();
+    }
+    function checkJump(dt) {
+      let jump = false;
+      for (let i = 0; i < hands.length; i++) {
+        const h = hands[i]; if (!h || !h.object3D.visible) continue;
+        const y = new THREE.Vector3().setFromMatrixPosition(h.object3D.matrixWorld).y;
+        if (h.lastY !== null) {
+          const vy = (y - h.lastY) / dt; h.velocityY = vy;
+          if (vy < params.downTriggerVel && catOnGround) jump = true;
+        }
+        h.lastY = y;
+      }
+      return jump;
+    }
+
+    // Pinch grab/drop
+    const pinchThreshold = 0.03;
+    const pickupRadius = 0.16;
+    const itemDamping = 0.92;
+    const itemGravity = -9.8;
+    const dropImpulse = 0.6;
+    const tmpV = new THREE.Vector3();
+    function worldPos(obj) { return tmpV.setFromMatrixPosition(obj.matrixWorld).clone(); }
+    function isPinching(h) {
+      const a = h.joints.indexTip, b = h.joints.thumbTip;
+      if (!a || !b || !a.visible || !b.visible) return false;
+      const pa = worldPos(a), pb = worldPos(b);
+      return pa.distanceTo(pb) < pinchThreshold;
+    }
+    function pinchPoint(h) {
+      const pa = worldPos(h.joints.indexTip), pb = worldPos(h.joints.thumbTip);
+      return pa.add(pb).multiplyScalar(0.5);
+    }
+    function findNearestItem(p) {
+      let best = null, bestDist = pickupRadius;
+      for (const m of grabbables) {
+        if (m.userData.heldBy !== null) continue;
+        const d = m.position.distanceTo(p);
+        if (d < bestDist) { best = m; bestDist = d; }
+      }
+      return best;
+    }
+    function grabItem(handIndex, item) {
+      const h = hands[handIndex];
+      h.heldItem = item; item.userData.heldBy = handIndex; item.userData.vel.set(0,0,0);
+      h.object3D.add(item);
+      const pp = pinchPoint(h);
+      const local = h.object3D.worldToLocal(pp.clone());
+      item.position.copy(local);
+    }
+    function dropItem(handIndex) {
+      const h = hands[handIndex], item = h?.heldItem; if (!item) return;
+      h.heldItem = null; item.userData.heldBy = null;
+      const world = new THREE.Vector3().setFromMatrixPosition(item.matrixWorld);
+      scene.add(item); item.position.copy(world);
+      const f = new THREE.Vector3(); camera.getWorldDirection(f); f.multiplyScalar(dropImpulse);
+      item.userData.vel.copy(f);
+    }
+    function updateHeldItem(handIndex) {
+      const h = hands[handIndex], item = h?.heldItem; if (!item) return;
+      const pp = pinchPoint(h);
+      const forward = new THREE.Vector3(); camera.getWorldDirection(forward);
+      pp.add(forward.multiplyScalar(0.04));
+      const local = h.object3D.worldToLocal(pp.clone());
+      item.position.copy(local);
+    }
+    function updateItemPhysics(dt) {
+      for (const m of grabbables) {
+        if (m.userData.heldBy !== null) continue;
+        m.userData.vel.y += itemGravity * dt;
+        m.position.addScaledVector(m.userData.vel, dt);
+        m.userData.vel.multiplyScalar(itemDamping);
+        if (m.position.y < 0.08) {
+          m.position.y = 0.08; m.userData.vel.y = 0;
+          m.userData.vel.x *= 0.8; m.userData.vel.z *= 0.8;
+        }
+      }
+    }
+
+    // Keyboard/mouse fallback (desktop/mobile preview)
+    let keys = { w:false,a:false,s:false,d:false, space:false, e:false };
+    window.addEventListener('keydown', (e) => {
+      const k = e.key.toLowerCase();
+      if (k in keys) keys[k] = true;
+    });
+    window.addEventListener('keyup', (e) => {
+      const k = e.key.toLowerCase();
+      if (k in keys) keys[k] = false;
+    });
+    // Simple mouse look
+    let yaw = 0, targetYaw = 0;
+    document.addEventListener('mousemove', (e) => {
+      targetYaw = ((e.clientX / window.innerWidth) - 0.5) * 1.0;
+    });
+
+    function kbSteerDir() {
+      const dir = new THREE.Vector3();
+      if (keys.w) dir.z -= 1;
+      if (keys.s) dir.z += 1;
+      if (keys.a) dir.x -= 1;
+      if (keys.d) dir.x += 1;
+      if (dir.lengthSq() > 0) dir.normalize();
+      // rotate by camera yaw
+      const m = headYawMatrix(); return dir.applyMatrix4(m);
+    }
+
+    // Resize
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    // Animation loop
+    let last = performance.now();
+    renderer.setAnimationLoop(() => {
+      const now = performance.now();
+      const dt = Math.min(0.05, (now - last) / 1000);
+      last = now;
+
+      // Mouse look on desktop
+      yaw += (targetYaw - yaw) * 0.1;
+      camera.rotation.y = yaw;
+
+      // Steering
+      let steerWorld = getSteerDirection().applyMatrix4(headYawMatrix());
+      // Keyboard fallback
+      const kb = kbSteerDir();
+      if (kb.lengthSq() > 0) steerWorld.copy(kb);
+
+      const accel = steerWorld.multiplyScalar(params.moveGain);
+      catVel.x += accel.x; catVel.z += accel.z;
+
+      // Speed cap & damping
+      const hs = Math.hypot(catVel.x, catVel.z);
+      if (hs > params.maxSpeed) { const s = params.maxSpeed / hs; catVel.x *= s; catVel.z *= s; }
+      catVel.x *= params.damping; catVel.z *= params.damping;
+
+      // Jump (hand dip or Space)
+      if (checkJump(dt) || (keys.space && catOnGround)) {
+        catVel.y = params.jumpImpulse; catOnGround = false;
+      }
+      catVel.y += params.gravity * dt;
+
+      // Integrate cat position
+      cat.position.addScaledVector(catVel, dt);
+
+      // Ground collision
+      if (cat.position.y < 0) { cat.position.y = 0; catVel.y = 0; catOnGround = true; }
+
+      // Face movement direction
+      const forward = new THREE.Vector3(catVel.x, 0, catVel.z);
+      if (forward.lengthSq() > 1e-4) cat.lookAt(cat.position.clone().add(forward));
+
+      // Hand pinch grab/drop
+      for (let i = 0; i < hands.length; i++) {
+        const h = hands[i]; if (!h || !h.object3D.visible) continue;
+        const pinching = isPinching(h);
+        if (pinching && !h.heldItem) {
+          const near = findNearestItem(pinchPoint(h)); if (near) grabItem(i, near);
+        } else if (!pinching && h.heldItem) {
+          dropItem(i);
+        }
+        updateHeldItem(i);
+      }
+
+      // Keyboard grab/drop (nearest to camera center)
+      if (keys.e) {
+        const anyHeld = hands.some(h => h?.heldItem);
+        if (!anyHeld) {
+          // find nearest item to camera forward ray
+          let best = null, bestScore = 999;
+          const camPos = new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld);
+          const fwd = new THREE.Vector3(); camera.getWorldDirection(fwd);
+          for (const m of grabbables) {
+            if (m.userData.heldBy !== null) continue;
+            const toItem = m.position.clone().sub(camPos);
+            const dist = toItem.length();
+            const alignment = 1 - Math.abs(toItem.normalize().dot(fwd));
+            const score = dist + alignment * 2;
+            if (score < bestScore && dist < 1.2) { best = m; bestScore = score; }
+          }
+          if (best) {
+            // pseudo-hand 0 grab
+            if (!hands[0]) hands[0] = { object3D: camera, joints: {}, heldItem: null };
+            grabItem(0, best);
+          }
+        } else {
+          dropItem(0);
+        }
+        keys.e = false; // one-shot
+      }
+
+      // Physics for loose items
+      updateItemPhysics(dt);
+
+      renderer.render(scene, camera);
+    });
+  </script>
+</body>
+</html>
