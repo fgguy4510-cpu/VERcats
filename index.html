@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>VR Cat Demo</title>
+  <title>Cat + Arms Demo</title>
   <style>
     body { margin: 0; overflow: hidden; background: #000; }
     #info {
@@ -18,7 +18,7 @@
   <!-- Load Three.js from CDN -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
   <script>
-    // Scene, camera, renderer
+    // Scene setup
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x101018);
 
@@ -35,6 +35,74 @@
     dir.position.set(3, 5, 2);
     scene.add(dir);
 
+    // Ground
+    const ground = new THREE.Mesh(
+      new THREE.PlaneGeometry(50, 50),
+      new THREE.MeshStandardMaterial({ color: 0x303040, roughness: 1 })
+    );
+    ground.rotation.x = -Math.PI/2;
+    scene.add(ground);
+
+    // Cat figure
+    const cat = new THREE.Group();
+    const body = new THREE.Mesh(new THREE.BoxGeometry(0.6,0.3,1), new THREE.MeshStandardMaterial({color:0xffcc66}));
+    body.position.y = 0.15; cat.add(body);
+    const head = new THREE.Mesh(new THREE.BoxGeometry(0.3,0.3,0.3), new THREE.MeshStandardMaterial({color:0xffdd88}));
+    head.position.set(0,0.45,0.4); cat.add(head);
+    scene.add(cat);
+
+    // Arms (long tan cylinders)
+    const armMaterial = new THREE.MeshStandardMaterial({ color: 0xD2B48C }); // tan
+    const leftArm = new THREE.Mesh(new THREE.CylinderGeometry(0.08,0.08,1.2,16), armMaterial);
+    leftArm.position.set(-0.6,1.0,-0.5);
+    scene.add(leftArm);
+
+    const rightArm = new THREE.Mesh(new THREE.CylinderGeometry(0.08,0.08,1.2,16), armMaterial);
+    rightArm.position.set(0.6,1.0,-0.5);
+    scene.add(rightArm);
+
+    // Keyboard controls
+    let keys = {w:false,a:false,s:false,d:false,space:false};
+    window.addEventListener('keydown', e => { if(e.key in keys) keys[e.key]=true; });
+    window.addEventListener('keyup', e => { if(e.key in keys) keys[e.key]=false; });
+
+    // Mouse look
+    let yaw = 0, targetYaw = 0;
+    document.addEventListener('mousemove', e => {
+      targetYaw = ((e.clientX / window.innerWidth)-0.5)*1.5;
+    });
+
+    // Cat physics
+    let vel = new THREE.Vector3(0,0,0);
+    let onGround = true;
+
+    function animate() {
+      requestAnimationFrame(animate);
+
+      yaw += (targetYaw - yaw)*0.1;
+      camera.rotation.y = yaw;
+
+      const dir = new THREE.Vector3();
+      if(keys.w) dir.z -= 1;
+      if(keys.s) dir.z += 1;
+      if(keys.a) dir.x -= 1;
+      if(keys.d) dir.x += 1;
+      if(dir.lengthSq()>0) dir.normalize();
+      vel.x += dir.x*0.05;
+      vel.z += dir.z*0.05;
+
+      if(keys.space && onGround) { vel.y = 0.2; onGround=false; }
+      vel.y -= 0.01;
+
+      cat.position.add(vel);
+      if(cat.position.y<0) { cat.position.y=0; vel.y=0; onGround=true; }
+
+      renderer.render(scene,camera);
+    }
+    animate();
+  </script>
+</body>
+</html>
     // Ground
     const ground = new THREE.Mesh(
       new THREE.PlaneGeometry(50, 50),
